@@ -141,7 +141,7 @@ export function createSidebar() {
   info.style.fontSize = '0.7em';
   info.style.color = '#555570';
   info.style.lineHeight = '1.8';
-  info.innerHTML = 'Drag the green sphere to move<br>Adjust slider to explore null space<br>Right-click drag to orbit camera';
+  info.innerHTML = 'Drag the green sphere to move<br>Adjust slider to explore null space<br>Right-click drag to orbit camera<br><br><span style="color:#ffaa00">Tip:</span> Reset pose after changing null space bias to avoid residual swinging';
   el.appendChild(info);
 
   return {

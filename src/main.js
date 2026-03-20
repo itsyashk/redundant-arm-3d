@@ -80,7 +80,17 @@ function animate() {
     applyNullSpace(robotState, nullValue);
   }
 
-  // 3. FK for rendering
+  // 3. Ground enforcement — keep end effector above floor
+  {
+    const fkCheck = forwardKinematics(robotState);
+    const eeY = fkCheck.positions[robotState.numJoints][1];
+    if (eeY < 0.05) {
+      const eePos = fkCheck.positions[robotState.numJoints];
+      solveIK(robotState, [eePos[0], 0.05, eePos[2]], 3);
+    }
+  }
+
+  // 4. FK for rendering
   const fk = forwardKinematics(robotState);
 
   // 4. Update meshes

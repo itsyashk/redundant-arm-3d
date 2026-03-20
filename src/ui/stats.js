@@ -19,7 +19,7 @@ export function createStats(container) {
   return {
     update(manipulability, eePosition, angles) {
       manipEl.textContent = `Manipulability: ${manipulability.toFixed(3)}`;
-      posEl.textContent = `EE Position: (${eePosition[0].toFixed(2)}, ${eePosition[1].toFixed(2)}, ${eePosition[2].toFixed(2)})`;
+      posEl.textContent = `End Effector: (${eePosition[0].toFixed(2)}, ${eePosition[1].toFixed(2)}, ${eePosition[2].toFixed(2)})`;
       const degs = [];
       for (let i = 0; i < angles.length; i++) {
         degs.push((angles[i] * 180 / Math.PI).toFixed(1));

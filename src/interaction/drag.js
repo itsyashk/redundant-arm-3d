@@ -89,6 +89,9 @@ export function createDragSystem(camera, renderer, controls, getEEMesh, onDragSt
     raycaster.setFromCamera(mouse, camera);
 
     if (raycaster.ray.intersectPlane(dragPlane, intersection)) {
+      // Clamp above ground
+      if (intersection.y < 0.05) intersection.y = 0.05;
+
       if (intersection.distanceTo(getEEMesh().position) < 5) {
         targetMesh.position.copy(intersection);
         targetMesh.visible = true;
