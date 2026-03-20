@@ -1,0 +1,1034 @@
+# redundant-arm-3d
+
+Interactive 3D browser app where you drag a redundant robot arm's end effector through space and use a slider to explore null space reconfiguration — the arm reshapes while the gripper stays perfectly still.
+
+---
+
+## Tech Stack
+- Vite (vanilla JS, no React, no TypeScript)
+- Three.js (npm, ES module imports)
+- No other dependencies
+
+## Setup
+```
+npm create vite@latest . -- --template vanilla
+npm install three
+```
+
+## File Structure
+```
+redundant-arm-3d/
+  index.html
+  package.json
+  vite.config.js
+  src/
+    main.js
+    math/
+      vector.js
+      matrix.js
+      rotations.js
+      eigen.js
+    kinematics/
+      robot.js
+      fk.js
+      jacobian.js
+      ik.js
+      nullspace.js
+    scene/
+      setup.js
+      robotMeshes.js
+      ellipsoid.js
+      trail.js
+      ground.js
+    interaction/
+      drag.js
+    ui/
+      sidebar.js
+      stats.js
+    styles/
+      main.css
+```
+
+---
+
+## FILE-BY-FILE SPECIFICATION
+
+---
+
+### src/math/vector.js
+Exports pure functions. No classes. All vectors are length-3 arrays [x, y, z].
+
+```
+export function dot(a, b)
+  return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+export function cross(a, b)
+  return [
+    a[1]*b[2] - a[2]*b[1],
+    a[2]*b[0] - a[0]*b[2],
+    a[0]*b[1] - a[1]*b[0]
+  ]
+
+export function add(a, b)
+  return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]
+
+export function sub(a, b)
+  return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]
+
+export function scale(a, s)
+  return [a[0]*s, a[1]*s, a[2]*s]
+
+export function norm(a)
+  return Math.sqrt(dot(a, a))
+
+export function normalize(a)
+  const n = norm(a)
+  if (n < 1e-10) return [0, 0, 0]
+  return scale(a, 1/n)
+
+export function distance(a, b)
+  return norm(sub(a, b))
+
+export function clampScalar(val, min, max)
+  return Math.max(min, Math.min(max, val))
+```
+
+---
+
+### src/math/matrix.js
+All matrices stored as flat Float64Array in ROW-MAJOR order. Element (i,j) of an MxN matrix is at index i*N + j.
+
+Exports:
+
+```
+// --- Creation ---
+
+export function mat3_identity()
+  return new Float64Array([1,0,0, 0,1,0, 0,0,1])
+
+export function matN_identity(n)
+  // returns NxN identity as Float64Array of length n*n
+
+export function mat_zeros(rows, cols)
+  return new Float64Array(rows * cols)
+
+
+// --- 3x3 Operations ---
+
+export function mat3_multiply(A, B)
+  // standard 3x3 multiply, returns new Float64Array(9)
+  // C[i*3+j] = sum_k A[i*3+k] * B[k*3+j]
+
+export function mat3_transpose(A)
+  // swap (i,j) and (j,i), returns new Float64Array(9)
+
+export function mat3_vec_multiply(A, v)
+  // A is 3x3 flat array, v is [x,y,z]
+  // returns [x', y', z']
+
+export function mat3_determinant(A)
+  // A[0]*(A[4]*A[8]-A[5]*A[7]) - A[1]*(A[3]*A[8]-A[5]*A[6]) + A[2]*(A[3]*A[7]-A[4]*A[6])
+
+export function mat3_inverse(A)
+  // cofactor method
+  // compute determinant, if abs(det) < 1e-10 return identity
+  // compute adjugate (transposed cofactor matrix)
+  // multiply each element by 1/det
+  // return new Float64Array(9)
+
+export function mat3_add_scaled_identity(A, s)
+  // returns A + s*I  (for damping: A + lambda^2 * I)
+  // modifies diagonal: result[0] += s, result[4] += s, result[8] += s
+
+
+// --- General MxN Operations ---
+
+export function matMN_multiply(A, B, rowsA, colsA, colsB)
+  // A is rowsA x colsA, B is colsA x colsB
+  // returns Float64Array(rowsA * colsB)
+  // C[i*colsB + j] = sum_k A[i*colsA + k] * B[k*colsB + j]
+
+export function matMN_transpose(A, rows, cols)
+  // returns Float64Array(cols * rows)
+  // result[j*rows + i] = A[i*cols + j]
+
+export function matMN_vec_multiply(A, v, rows, cols)
+  // A is rows x cols, v is length-cols array
+  // returns length-rows array
+  // result[i] = sum_j A[i*cols + j] * v[j]
+
+export function matMN_subtract(A, B, len)
+  // element-wise subtraction, returns new Float64Array(len)
+```
+
+CRITICAL: Every function that creates a new array should use Float64Array for performance. But the return from mat3_vec_multiply and matMN_vec_multiply should be regular Arrays (length 3 or N) since they represent vectors used with the vector.js functions.
+
+---
+
+### src/math/rotations.js
+Exports functions that return 3x3 rotation matrices as Float64Array(9) in row-major order.
+
+```
+export function Rz(theta)
+  const c = Math.cos(theta), s = Math.sin(theta)
+  return new Float64Array([c, -s, 0, s, c, 0, 0, 0, 1])
+
+export function Ry(theta)
+  const c = Math.cos(theta), s = Math.sin(theta)
+  return new Float64Array([c, 0, s, 0, 1, 0, -s, 0, c])
+
+export function Rx(theta)
+  const c = Math.cos(theta), s = Math.sin(theta)
+  return new Float64Array([1, 0, 0, 0, c, -s, 0, s, c])
+
+export function rotationAboutAxis(axis, theta)
+  // axis is 'x', 'y', or 'z'
+  // dispatches to Rx, Ry, or Rz
+```
+
+---
+
+### src/math/eigen.js
+3x3 symmetric matrix eigendecomposition for the manipulability ellipsoid.
+
+```
+export function eigendecompose3x3_symmetric(A)
+  // A is a 3x3 symmetric matrix (Float64Array(9))
+  // Returns { values: [l1, l2, l3], vectors: [v1, v2, v3] }
+  // where l1 >= l2 >= l3 and v_i are unit eigenvectors
+  //
+  // Use the Jacobi eigenvalue algorithm:
+  // 1. Copy A to working matrix
+  // 2. Repeatedly find the largest off-diagonal element
+  // 3. Apply Givens rotation to zero it out
+  // 4. Accumulate rotations to get eigenvectors
+  // 5. Converge when off-diagonal elements < 1e-10
+  // 6. Diagonal elements are eigenvalues
+  //
+  // Max iterations: 50 (always converges for 3x3 in practice)
+  //
+  // IMPORTANT: Clamp eigenvalues to max(val, 0) before returning
+  // (numerical noise can produce tiny negatives for near-singular matrices)
+  //
+  // Sort eigenvalues descending, reorder eigenvectors to match
+```
+
+---
+
+### src/kinematics/robot.js
+Robot model configuration. Exports a factory function and constants.
+
+```
+export const DEFAULT_NUM_JOINTS = 7
+export const MIN_JOINTS = 4
+export const MAX_JOINTS = 10
+export const LINK_LENGTH = 0.4
+
+export function createRobotState(numJoints)
+  // Returns:
+  // {
+  //   numJoints: number,
+  //   angles: Float64Array(numJoints),  -- initialized with small random perturbations [-0.15, 0.15]
+  //   linkLength: 0.4,
+  //   jointAxes: array of 'z' or 'y' strings -- even indices = 'z', odd indices = 'y'
+  //   localLinkVector: [0, 0.4, 0]  -- "up" in local frame
+  // }
+  //
+  // The random perturbation in initial angles breaks the straight-line singularity.
+  // Without it, the Jacobian is rank-deficient at zero config because all joints
+  // are collinear and cross products are zero.
+
+export function resetAngles(state)
+  // Reset all angles to small random perturbations (not zero)
+```
+
+---
+
+### src/kinematics/fk.js
+Forward kinematics. The most important function in the app.
+
+```
+import { mat3_multiply, mat3_vec_multiply, mat3_identity } from '../math/matrix.js'
+import { add } from '../math/vector.js'
+import { Rz, Ry } from '../math/rotations.js'
+
+export function forwardKinematics(state)
+  // Input: state from robot.js (needs .angles, .numJoints, .linkLength, .jointAxes)
+  //
+  // Output: {
+  //   positions: Array of (numJoints + 1) 3D vectors -- [base, joint1, ..., jointN, endEffector]
+  //             (positions[0] = [0,0,0] = base, positions[numJoints] = end effector)
+  //   axes: Array of numJoints 3D vectors -- world-frame rotation axis of each joint
+  // }
+  //
+  // Algorithm:
+  //   R_cumulative = I_3x3
+  //   current_pos = [0, 0, 0]
+  //   positions = [current_pos]
+  //   axes = []
+  //
+  //   for i = 0 to numJoints - 1:
+  //     // Local axis
+  //     if jointAxes[i] == 'z': local_axis = [0, 0, 1]
+  //     else: local_axis = [0, 1, 0]
+  //
+  //     // World axis (for Jacobian)
+  //     world_axis = mat3_vec_multiply(R_cumulative, local_axis)
+  //     axes.push(world_axis)
+  //
+  //     // Joint rotation matrix
+  //     if jointAxes[i] == 'z': R_joint = Rz(angles[i])
+  //     else: R_joint = Ry(angles[i])
+  //
+  //     // Accumulate rotation
+  //     R_cumulative = mat3_multiply(R_cumulative, R_joint)
+  //
+  //     // Link vector in world frame
+  //     world_link = mat3_vec_multiply(R_cumulative, [0, linkLength, 0])
+  //
+  //     // Next position
+  //     current_pos = add(current_pos, world_link)
+  //     positions.push(current_pos)
+  //
+  //   return { positions, axes }
+  //
+  // VERIFICATION:
+  // At near-zero angles, positions should form a near-vertical column
+  // positions[numJoints] should be approximately [0, numJoints * linkLength, 0]
+```
+
+---
+
+### src/kinematics/jacobian.js
+Geometric Jacobian computation.
+
+```
+import { cross, sub } from '../math/vector.js'
+
+export function computeJacobian(positions, axes, numJoints)
+  // Returns Float64Array(3 * numJoints) -- 3xN matrix in row-major
+  //
+  // For each joint i:
+  //   r = sub(positions[numJoints], positions[i])  // vector from joint to end effector
+  //   col = cross(axes[i], r)
+  //
+  //   J[0 * numJoints + i] = col[0]   // row 0 (x)
+  //   J[1 * numJoints + i] = col[1]   // row 1 (y)
+  //   J[2 * numJoints + i] = col[2]   // row 2 (z)
+  //
+  // This is the position-only geometric Jacobian for revolute joints.
+  // Each column is the linear velocity contribution of joint i to the end effector.
+
+export function computeManipulability(J, numJoints)
+  // Compute JJt (3x3) then return sqrt(max(det(JJt), 0))
+  // Use mat3_determinant from matrix.js
+```
+
+---
+
+### src/kinematics/ik.js
+Inverse kinematics solver.
+
+```
+import { forwardKinematics } from './fk.js'
+import { computeJacobian, computeManipulability } from './jacobian.js'
+import { sub, norm, normalize, scale } from '../math/vector.js'
+import { clampScalar } from '../math/vector.js'
+import {
+  mat3_inverse, mat3_add_scaled_identity,
+  matMN_multiply, matMN_transpose, matMN_vec_multiply
+} from '../math/matrix.js'
+
+const BASE_LAMBDA = 0.5
+const MAX_DELTA_Q = 0.05
+const MAX_ERROR = 0.5
+
+export function solveIK(state, target, iterations = 5)
+  // Mutates state.angles in place
+  //
+  // for iter = 0 to iterations - 1:
+  //   fk = forwardKinematics(state)
+  //   ee = fk.positions[state.numJoints]
+  //   error = sub(target, ee)
+  //
+  //   // Early exit
+  //   if norm(error) < 0.001: break
+  //
+  //   // Clamp error vector magnitude
+  //   if norm(error) > MAX_ERROR:
+  //     error = scale(normalize(error), MAX_ERROR)
+  //
+  //   J = computeJacobian(fk.positions, fk.axes, state.numJoints)
+  //
+  //   // Adaptive damping
+  //   w = computeManipulability(J, state.numJoints)
+  //   lambda = BASE_LAMBDA + (w < 0.01 ? 0.5 / (w + 0.001) : 0)
+  //   lambda = Math.min(lambda, 5.0)
+  //
+  //   // Pseudoinverse: J_pinv = Jt * inv(J * Jt + lambda^2 * I)
+  //   Jt = matMN_transpose(J, 3, N)                         // Nx3
+  //   JJt = matMN_multiply(J, Jt, 3, N, 3)                  // 3x3
+  //   JJt_damped = mat3_add_scaled_identity(JJt, lambda * lambda)  // 3x3
+  //   JJt_inv = mat3_inverse(JJt_damped)                     // 3x3
+  //   J_pinv = matMN_multiply(Jt, JJt_inv, N, 3, 3)         // Nx3
+  //
+  //   // delta_q = J_pinv * error
+  //   delta_q = matMN_vec_multiply(J_pinv, error, N, 3)      // length N
+  //
+  //   // Clamp per joint
+  //   for i in 0..N-1:
+  //     delta_q[i] = clampScalar(delta_q[i], -MAX_DELTA_Q, MAX_DELTA_Q)
+  //
+  //   // Apply
+  //   for i in 0..N-1:
+  //     state.angles[i] += delta_q[i]
+
+export function computePseudoinverse(J, numJoints, lambda)
+  // Same pseudoinverse logic as above, extracted for reuse by nullspace.js
+  // Returns J_pinv as Float64Array(numJoints * 3) -- Nx3 matrix
+```
+
+---
+
+### src/kinematics/nullspace.js
+Null space projection and secondary objective.
+
+```
+import { forwardKinematics } from './fk.js'
+import { computeJacobian } from './jacobian.js'
+import { computePseudoinverse, solveIK } from './ik.js'
+import { distance } from '../math/vector.js'
+import { clampScalar } from '../math/vector.js'
+import { matMN_multiply, matN_identity, matMN_subtract, matMN_vec_multiply } from '../math/matrix.js'
+
+const NULLSPACE_GAIN = 0.1
+const MAX_NULL_DELTA = 0.03
+const DRIFT_THRESHOLD = 0.002
+
+export function applyNullSpace(state, sliderValue)
+  // Does nothing if abs(sliderValue) < 0.001 or numJoints <= 3
+  //
+  // 1. Compute FK, Jacobian, Pseudoinverse
+  //    fk = forwardKinematics(state)
+  //    ee_before = [...fk.positions[state.numJoints]]  // COPY, not reference
+  //    J = computeJacobian(...)
+  //    J_pinv = computePseudoinverse(J, N, lambda=0.5)
+  //
+  // 2. Secondary objective: bias toward zero config
+  //    z = new Array(N)
+  //    for i = 0..N-1: z[i] = -sliderValue * NULLSPACE_GAIN * state.angles[i]
+  //
+  // 3. Null space projector: N_proj = I_NxN - J_pinv * J
+  //    JpJ = matMN_multiply(J_pinv, J, N, 3, N)     // NxN
+  //    I_N = matN_identity(N)                          // NxN
+  //    N_proj = matMN_subtract(I_N, JpJ, N*N)          // NxN
+  //
+  // 4. Project: dq = N_proj * z
+  //    dq = matMN_vec_multiply(N_proj, z, N, N)
+  //
+  // 5. Clamp
+  //    for i: dq[i] = clampScalar(dq[i], -MAX_NULL_DELTA, MAX_NULL_DELTA)
+  //
+  // 6. Apply
+  //    for i: state.angles[i] += dq[i]
+  //
+  // 7. DRIFT CORRECTION (critical)
+  //    fk_after = forwardKinematics(state)
+  //    ee_after = fk_after.positions[state.numJoints]
+  //    if distance(ee_before, ee_after) > DRIFT_THRESHOLD:
+  //      solveIK(state, ee_before, 3)  // snap back to original ee position
+```
+
+---
+
+### src/scene/setup.js
+Three.js scene initialization. Exports the scene objects other modules need.
+
+```
+import * as THREE from 'three'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+
+export function createScene(container)
+  // container is the DOM element to mount the renderer in
+  //
+  // Creates and returns:
+  // {
+  //   scene,
+  //   camera,
+  //   renderer,
+  //   controls,    // OrbitControls instance
+  // }
+  //
+  // Renderer:
+  //   antialias: true
+  //   setPixelRatio(window.devicePixelRatio)
+  //   shadowMap.enabled = true
+  //   shadowMap.type = THREE.PCFSoftShadowMap
+  //   toneMapping = THREE.ACESFilmicToneMapping
+  //   toneMappingExposure = 1.2
+  //   Size: fills the container element (not full window — sidebar takes space)
+  //
+  // Scene:
+  //   background = new THREE.Color(0x0a0a1a)
+  //   fog = new THREE.FogExp2(0x0a0a1a, 0.06)
+  //
+  // Camera:
+  //   PerspectiveCamera(50, aspect, 0.1, 100)
+  //   position.set(4, 3, 4)
+  //
+  // Lighting:
+  //   AmbientLight(0x404060, 0.6)
+  //   DirectionalLight(0xffffff, 1.0) at (5, 8, 5) with shadow
+  //   DirectionalLight(0x8888ff, 0.3) at (-3, 2, -3) fill
+  //   HemisphereLight(0x606080, 0x202040, 0.5)
+  //
+  // OrbitControls:
+  //   target.set(0, 1.4, 0)
+  //   enableDamping = true
+  //   dampingFactor = 0.08
+  //   minDistance = 1.5
+  //   maxDistance = 12
+  //   maxPolarAngle = Math.PI * 0.85
+  //
+  // Resize handler:
+  //   Listen on window resize
+  //   Update camera aspect based on container size (NOT window.innerWidth)
+  //   Update renderer size to container size
+```
+
+---
+
+### src/scene/ground.js
+```
+import * as THREE from 'three'
+
+export function createGround(scene)
+  // Ground plane:
+  //   PlaneGeometry(20, 20)
+  //   MeshStandardMaterial color 0x15152a, roughness 0.9
+  //   rotation.x = -PI/2
+  //   receiveShadow = true
+  //
+  // Grid:
+  //   GridHelper(20, 40, 0x333355, 0x222244)
+  //   position.y = 0.001
+  //
+  // Add both to scene
+```
+
+---
+
+### src/scene/robotMeshes.js
+Manages all Three.js meshes for the robot arm. Must handle rebuilding when joint count changes.
+
+```
+import * as THREE from 'three'
+
+export function createRobotMeshes(scene, numJoints)
+  // Creates and returns:
+  // {
+  //   linkMeshes: Array of Mesh (numJoints cylinders)
+  //   jointMeshes: Array of Mesh (numJoints spheres)
+  //   eeMesh: Mesh (end effector sphere)
+  //   eeLight: PointLight (attached to eeMesh)
+  //   baseMesh: Mesh (base disc)
+  //   dispose(): function that removes all meshes from scene and disposes geometry/material
+  // }
+  //
+  // Link meshes:
+  //   CylinderGeometry(0.03, 0.03, 1, 8) -- unit height, scaled per frame
+  //   MeshStandardMaterial, color per link: HSL hue = i/numJoints * 0.8, sat 0.7, lightness 0.55
+  //   castShadow = true
+  //
+  // Joint meshes:
+  //   SphereGeometry(0.06, 16, 12)
+  //   MeshStandardMaterial color 0xe0e0e0, emissive 0x222233, roughness 0.3, metalness 0.6
+  //   castShadow = true
+  //
+  // End effector:
+  //   SphereGeometry(0.1, 24, 18)
+  //   MeshStandardMaterial color 0x00ffcc, emissive 0x00aa88, emissiveIntensity 0.5, roughness 0.2, metalness 0.8
+  //   Attach PointLight(0x00ffcc, 1.0, 3) as child
+  //
+  // Base:
+  //   CylinderGeometry(0.15, 0.18, 0.08, 24)
+  //   MeshStandardMaterial color 0x444466, roughness 0.5, metalness 0.7
+  //   position.y = 0.04
+  //
+  // dispose() MUST:
+  //   Remove every mesh from scene
+  //   Call geometry.dispose() and material.dispose() on every mesh
+  //   Remove eeLight from eeMesh and dispose
+  //   This prevents GPU memory leaks when rebuilding the arm
+
+export function updateRobotMeshes(meshes, positions)
+  // positions: array of 3D vectors from FK (length numJoints + 1)
+  //
+  // Update joint meshes:
+  //   for i in 0..numJoints-1:
+  //     jointMeshes[i].position.set(...positions[i])
+  //
+  // Update end effector:
+  //   eeMesh.position.set(...positions[numJoints])
+  //
+  // Update link meshes (cylinder between positions[i] and positions[i+1]):
+  //   for i in 0..numJoints-1:
+  //     p1 = new THREE.Vector3(...positions[i])
+  //     p2 = new THREE.Vector3(...positions[i+1])
+  //     mid = p1.clone().add(p2).multiplyScalar(0.5)
+  //     dir = p2.clone().sub(p1)
+  //     len = dir.length()
+  //
+  //     linkMeshes[i].position.copy(mid)
+  //     linkMeshes[i].scale.set(1, len, 1)
+  //
+  //     // Orient cylinder Y-axis along link direction
+  //     const up = new THREE.Vector3(0, 1, 0)
+  //     const quat = new THREE.Quaternion()
+  //     if (len > 1e-6) {
+  //       quat.setFromUnitVectors(up, dir.normalize())
+  //     }
+  //     linkMeshes[i].quaternion.copy(quat)
+```
+
+---
+
+### src/scene/ellipsoid.js
+Manipulability ellipsoid visualization.
+
+```
+import * as THREE from 'three'
+import { eigendecompose3x3_symmetric } from '../math/eigen.js'
+import { matMN_multiply, matMN_transpose } from '../math/matrix.js'
+
+export function createEllipsoid(scene)
+  // Create a wireframe sphere that will be scaled/oriented to show the ellipsoid
+  // SphereGeometry(1, 20, 14)
+  // MeshBasicMaterial color 0x00ff88, transparent true, opacity 0.15, wireframe true
+  // Start with visible = false
+  // Add to scene
+  // Return the mesh
+
+export function updateEllipsoid(mesh, J, numJoints, eePosition)
+  // 1. Compute JJt: matMN_multiply(J, Jt, 3, N, 3) -- 3x3
+  // 2. Eigendecompose JJt
+  // 3. Semi-axes = sqrt(eigenvalues) * VISUAL_SCALE (use 0.4 as scale factor)
+  // 4. mesh.scale.set(semi_axes[0], semi_axes[1], semi_axes[2])
+  // 5. Build rotation matrix from eigenvectors, convert to THREE.Matrix4, extract quaternion
+  //    - eigenvectors are columns of the rotation matrix
+  //    - const m = new THREE.Matrix4()
+  //    - m.makeBasis(new THREE.Vector3(...v1), new THREE.Vector3(...v2), new THREE.Vector3(...v3))
+  //    - mesh.quaternion.setFromRotationMatrix(m)
+  // 6. mesh.position.set(...eePosition)
+```
+
+---
+
+### src/scene/trail.js
+Pre-allocated trail system using a circular buffer.
+
+```
+import * as THREE from 'three'
+
+const POOL_SIZE = 400
+const MIN_DISTANCE = 0.005
+const FRAME_SKIP = 3
+
+export function createTrail(scene)
+  // Pre-allocate POOL_SIZE small sphere meshes
+  // SphereGeometry(0.015, 6, 4) -- shared geometry for all
+  // Each gets its own MeshBasicMaterial (so we can change opacity per sphere)
+  // Color: 0x00ffcc (matches end effector)
+  // All start with visible = false
+  //
+  // Returns: {
+  //   pool: Array of Mesh,
+  //   index: 0,
+  //   frameCounter: 0,
+  //   lastPosition: null,
+  //   setVisible(bool): shows/hides all active trail spheres
+  //   reset(): hides all, resets index and counters
+  // }
+
+export function updateTrail(trail, eePosition)
+  // trail.frameCounter++
+  // if frameCounter % FRAME_SKIP != 0: return
+  //
+  // if lastPosition is null or distance(eePosition, lastPosition) > MIN_DISTANCE:
+  //   sphere = pool[index % POOL_SIZE]
+  //   sphere.position.set(...eePosition)
+  //   sphere.visible = true
+  //   sphere.material.opacity = 1.0
+  //   index++
+  //   lastPosition = [...eePosition]
+  //
+  // Fade older spheres:
+  //   for each visible sphere in pool:
+  //     age = (index - sphere_index) / POOL_SIZE
+  //     sphere.material.opacity = Math.max(0.05, 1.0 - age)
+  //     if opacity <= 0.05: sphere.visible = false
+```
+
+---
+
+### src/interaction/drag.js
+3D drag interaction system. This is the most fragile module — follow spec exactly.
+
+```
+import * as THREE from 'three'
+
+export function createDragSystem(camera, renderer, controls, getEEMesh, onDragStart, onDrag, onDragEnd)
+  // getEEMesh: function that returns the current end effector mesh (needed because it changes on rebuild)
+  // onDragStart: callback()
+  // onDrag: callback(targetPosition: [x,y,z])
+  // onDragEnd: callback()
+  //
+  // Internal state:
+  //   isDragging = false
+  //   dragPlane = new THREE.Plane()
+  //   raycaster = new THREE.Raycaster()
+  //   mouse = new THREE.Vector2()
+  //   intersection = new THREE.Vector3()
+  //
+  // Target indicator:
+  //   Small sphere (radius 0.05, MeshBasicMaterial, color 0xffaa00, transparent, opacity 0.6)
+  //   Starts visible = false
+  //   Added to scene
+  //   Shows where the user is dragging to
+  //
+  // --- EVENT: pointerdown on renderer.domElement ---
+  //   1. Compute mouse NDC from event.clientX, event.clientY
+  //      IMPORTANT: account for canvas offset, not just window size
+  //      const rect = renderer.domElement.getBoundingClientRect()
+  //      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
+  //      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
+  //
+  //   2. raycaster.setFromCamera(mouse, camera)
+  //
+  //   3. intersects = raycaster.intersectObject(getEEMesh())
+  //      Also test a slightly larger invisible sphere around ee for easier grabbing:
+  //      Use raycaster threshold or create a larger invisible mesh for hit testing
+  //
+  //   4. If hit:
+  //      isDragging = true
+  //      controls.enabled = false
+  //      const camDir = new THREE.Vector3()
+  //      camera.getWorldDirection(camDir)
+  //      const eePos = getEEMesh().position.clone()
+  //      dragPlane.setFromNormalAndCoplanarPoint(camDir, eePos)
+  //      onDragStart()
+  //      event.preventDefault()
+  //      event.stopPropagation()
+  //
+  // --- EVENT: pointermove on renderer.domElement ---
+  //   If not isDragging: return
+  //   Update mouse NDC (same rect calculation)
+  //   raycaster.setFromCamera(mouse, camera)
+  //   if raycaster.ray.intersectPlane(dragPlane, intersection):
+  //     // Sanity check: don't let target go too far from ee
+  //     if intersection.distanceTo(getEEMesh().position) < 5:
+  //       targetIndicator.position.copy(intersection)
+  //       targetIndicator.visible = true
+  //       onDrag([intersection.x, intersection.y, intersection.z])
+  //   event.preventDefault()
+  //
+  // --- EVENT: pointerup on window (NOT just canvas — catches drags that leave the canvas) ---
+  //   if isDragging:
+  //     isDragging = false
+  //     controls.enabled = true
+  //     targetIndicator.visible = false
+  //     onDragEnd()
+  //
+  // Returns: {
+  //   isDragging(): boolean getter
+  //   dispose(): removes all event listeners
+  //   targetMesh: the target indicator mesh (add to scene externally)
+  // }
+```
+
+---
+
+### src/ui/sidebar.js
+Creates the HTML sidebar and returns references to all controls.
+
+```
+export function createSidebar()
+  // Creates a div#sidebar with:
+  //   position: fixed, top: 0, right: 0
+  //   width: 300px, height: 100vh
+  //   background: rgba(10, 10, 30, 0.88)
+  //   backdrop-filter: blur(12px)
+  //   border-left: 1px solid rgba(255,255,255,0.08)
+  //   padding: 28px
+  //   font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace
+  //   color: #c0c0d0
+  //   overflow-y: auto
+  //   z-index: 10
+  //   box-sizing: border-box
+  //
+  // Contents (create all elements programmatically):
+  //
+  // 1. Title: h1 "Redundant Arm 3D", font-size 1.3em, color #00ffcc, margin-bottom 4px
+  // 2. Subtitle: p "Null Space Explorer", font-size 0.75em, color #666680, margin-bottom 28px
+  //
+  // 3. Section: "Configuration"
+  //    - Label "Degrees of Freedom" + value display
+  //    - Range input: min=4, max=10, step=1, value=7
+  //
+  // 4. Section: "Null Space"
+  //    - Label "Null Space Bias" + value display
+  //    - Range input: min=-1, max=1, step=0.01, value=0
+  //
+  // 5. Section: "Visualization"
+  //    - Toggle: "Manipulability Ellipsoid" (checkbox styled as switch)
+  //    - Toggle: "End Effector Trail" (checkbox styled as switch)
+  //
+  // 6. Button: "Reset Pose" (full width, styled)
+  //
+  // 7. Section: "Stats" (id="stats-container")
+  //    - Will be populated by stats.js
+  //
+  // 8. Section: "Controls" (instructions)
+  //    - "Drag the green sphere to move"
+  //    - "Adjust slider to explore null space"
+  //    - "Right-click drag to orbit camera"
+  //    font-size 0.7em, color #555570
+  //
+  // Styling for sliders:
+  //   Custom CSS: thin track (4px), rounded, dark track color (#2a2a4a)
+  //   Thumb: 16px circle, color #00ffcc, cursor pointer
+  //   Use -webkit-appearance: none and style ::-webkit-slider-thumb / ::-moz-range-thumb
+  //
+  // Styling for toggle switches:
+  //   Label with relative positioning, 44px wide, 22px tall
+  //   Checkbox hidden, sibling span styled as the switch track/knob
+  //   On color: #00ffcc, off color: #2a2a4a
+  //
+  // Styling for button:
+  //   background: transparent, border: 1px solid #00ffcc, color: #00ffcc
+  //   padding: 10px, border-radius: 6px, cursor pointer, full width
+  //   hover: background #00ffcc22
+  //
+  // Returns: {
+  //   element: the sidebar div
+  //   jointSlider: the range input element
+  //   nullSpaceSlider: the range input element
+  //   manipulabilityToggle: the checkbox element
+  //   trailToggle: the checkbox element
+  //   resetButton: the button element
+  //   jointValueDisplay: the span showing current value
+  //   nullSpaceValueDisplay: the span showing current value
+  // }
+```
+
+---
+
+### src/ui/stats.js
+Live stats display.
+
+```
+export function createStats(container)
+  // Creates elements inside the container div:
+  //   - "Manipulability: 0.000" (monospace, 0.75em)
+  //   - "EE Position: (0.00, 0.00, 0.00)"
+  //   - "Joint Angles:" followed by a compact list of angles in degrees
+  //
+  // Returns: {
+  //   update(manipulability, eePosition, angles): updates all display values
+  // }
+  //
+  // Format:
+  //   manipulability: 3 decimal places
+  //   position: 2 decimal places each axis
+  //   angles: 1 decimal place, degrees, space-separated
+```
+
+---
+
+### src/main.js
+Entry point. Wires everything together.
+
+```
+import './styles/main.css'
+import { createScene } from './scene/setup.js'
+import { createGround } from './scene/ground.js'
+import { createRobotMeshes, updateRobotMeshes } from './scene/robotMeshes.js'
+import { createEllipsoid, updateEllipsoid } from './scene/ellipsoid.js'
+import { createTrail, updateTrail } from './scene/trail.js'
+import { createDragSystem } from './interaction/drag.js'
+import { createSidebar } from './ui/sidebar.js'
+import { createStats } from './ui/stats.js'
+import { createRobotState, resetAngles } from './kinematics/robot.js'
+import { forwardKinematics } from './kinematics/fk.js'
+import { computeJacobian, computeManipulability } from './kinematics/jacobian.js'
+import { solveIK } from './kinematics/ik.js'
+import { applyNullSpace } from './kinematics/nullspace.js'
+
+// --- State ---
+let robotState = createRobotState(7)
+let ikTarget = null           // [x,y,z] or null when not dragging
+let isDraggingActive = false
+
+// --- DOM Setup ---
+const canvasContainer = document.getElementById('canvas-container')
+const { scene, camera, renderer, controls } = createScene(canvasContainer)
+
+// --- Scene Objects ---
+createGround(scene)
+let robotMeshes = createRobotMeshes(scene, robotState.numJoints)
+const ellipsoidMesh = createEllipsoid(scene)
+const trail = createTrail(scene)
+
+// --- Drag System ---
+const drag = createDragSystem(
+  camera, renderer, controls,
+  () => robotMeshes.eeMesh,
+  () => { isDraggingActive = true },
+  (target) => { ikTarget = target },
+  () => { isDraggingActive = false; ikTarget = null }
+)
+scene.add(drag.targetMesh)
+
+// --- UI ---
+const sidebar = createSidebar()
+document.body.appendChild(sidebar.element)
+const stats = createStats(document.getElementById('stats-container'))
+
+// --- UI Event Binding ---
+
+sidebar.jointSlider.addEventListener('input', (e) => {
+  const n = parseInt(e.target.value)
+  sidebar.jointValueDisplay.textContent = n
+  robotMeshes.dispose()
+  robotState = createRobotState(n)
+  robotMeshes = createRobotMeshes(scene, n)
+  trail.reset()
+})
+
+sidebar.nullSpaceSlider.addEventListener('input', (e) => {
+  sidebar.nullSpaceValueDisplay.textContent = parseFloat(e.target.value).toFixed(2)
+})
+
+sidebar.resetButton.addEventListener('click', () => {
+  resetAngles(robotState)
+  trail.reset()
+})
+
+// --- Animation Loop ---
+
+function animate() {
+  requestAnimationFrame(animate)
+
+  // 1. IK if dragging
+  if (isDraggingActive && ikTarget) {
+    solveIK(robotState, ikTarget, 5)
+  }
+
+  // 2. Null space
+  const nullValue = parseFloat(sidebar.nullSpaceSlider.value)
+  if (Math.abs(nullValue) > 0.001 && robotState.numJoints > 3) {
+    applyNullSpace(robotState, nullValue)
+  }
+
+  // 3. FK for rendering
+  const fk = forwardKinematics(robotState)
+
+  // 4. Update meshes
+  updateRobotMeshes(robotMeshes, fk.positions)
+
+  // 5. Ellipsoid
+  if (sidebar.manipulabilityToggle.checked) {
+    const J = computeJacobian(fk.positions, fk.axes, robotState.numJoints)
+    updateEllipsoid(ellipsoidMesh, J, robotState.numJoints, fk.positions[robotState.numJoints])
+    ellipsoidMesh.visible = true
+  } else {
+    ellipsoidMesh.visible = false
+  }
+
+  // 6. Trail
+  if (sidebar.trailToggle.checked) {
+    updateTrail(trail, fk.positions[robotState.numJoints])
+  }
+
+  // 7. Stats
+  const J = computeJacobian(fk.positions, fk.axes, robotState.numJoints)
+  const w = computeManipulability(J, robotState.numJoints)
+  stats.update(w, fk.positions[robotState.numJoints], robotState.angles)
+
+  // 8. Render
+  controls.update()
+  renderer.render(scene, camera)
+}
+
+animate()
+```
+
+---
+
+### src/styles/main.css
+```
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a1a;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+#canvas-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 300px;   /* leave room for sidebar */
+  bottom: 0;
+}
+
+#canvas-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+```
+
+---
+
+### index.html
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Redundant Arm 3D — Null Space Explorer</title>
+</head>
+<body>
+  <div id="canvas-container"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
+```
+
+---
+
+## KNOWN PITFALLS AND REQUIRED FIXES
+
+1. **Initial singularity**: At zero angles the arm is straight, Jacobian is rank-deficient. The createRobotState function MUST perturb initial angles randomly in [-0.15, 0.15]. Same for resetAngles.
+
+2. **Null space drift**: Floating point errors in the null space projector cause the end effector to drift over time. The applyNullSpace function MUST include the drift correction step (re-run IK toward stored ee position if drift exceeds threshold).
+
+3. **Cylinder orientation**: Three.js CylinderGeometry is Y-up. Use setFromUnitVectors(new THREE.Vector3(0,1,0), direction.normalize()) for the quaternion.
+
+4. **Pointer leaving canvas**: If the user drags off the canvas and releases, pointerup on the canvas never fires. The pointerup listener MUST be on window, not just the canvas.
+
+5. **Memory leak on rebuild**: When joint count changes, the old meshes must be removed from the scene AND have geometry.dispose() and material.dispose() called. The dispose() function on robotMeshes handles this.
+
+6. **Canvas sizing**: The renderer and camera aspect ratio must be based on the canvas-container size (window.innerWidth - 300), NOT window.innerWidth. The sidebar takes 300px.
+
+7. **OrbitControls during drag**: controls.enabled must be set to false on drag start and true on drag end. Otherwise the camera rotates while you try to drag the end effector.
+
+8. **Eigenvalue NaN**: Clamp all eigenvalues to max(val, 0) before taking sqrt in the ellipsoid computation. Near-singular JJt can produce tiny negative eigenvalues from numerical noise.
+
+9. **mat3_add_scaled_identity must return a new matrix**: Do not mutate the input JJt. Create a copy, add to its diagonal, return the copy. Otherwise the Jacobian computation is corrupted for subsequent use.
+
+10. **Raycaster hit detection**: The end effector sphere is small (radius 0.1). To make it easier to grab, either use a larger invisible sphere for hit testing or set raycaster.params.Mesh.threshold.
