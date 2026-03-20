@@ -39,7 +39,9 @@ const drag = createDragSystem(
   () => robotMeshes.eeMesh,
   () => { isDraggingActive = true; },
   (target) => { ikTarget = target; },
-  () => { isDraggingActive = false; ikTarget = null; }
+  () => { isDraggingActive = false; ikTarget = null; },
+  () => robotMeshes.buttons || [],
+  (jointIndex, delta) => { robotState.angles[jointIndex] += delta; }
 );
 scene.add(drag.targetMesh);
 scene.add(drag.hitSphere);
